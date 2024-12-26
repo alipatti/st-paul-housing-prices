@@ -1,13 +1,14 @@
-from typing import List, Optional
-from playwright.async_api import async_playwright
-from playwright.async_api import BrowserContext
+from typing import Annotated, Optional
 from pathlib import Path
-import asyncio_pool
-import asyncio
-import typer
 from functools import wraps
 
-DATA_PATH = Path("data")
+from playwright.async_api import Page, async_playwright
+import asyncio
+import typer
+from rich.progress import track
+from rich import print
+
+DATA_PATH = Path("data/raw")
 
 SEARCH_PAGE_URL = "https://beacon.schneidercorp.com/Application.aspx?AppID=959&LayerID=18852&PageTypeID=2&PageID=12460"
 
@@ -17,10 +18,7 @@ SUBMIT_BUTTON_SELECTOR = "#ctlBodyPane_ctl00_ctl01_btnSearch"
 DOWNLOAD_BUTTON_SELECTOR = "#ctlBodyPane_ctl00_ctl01_btnDownload"
 
 
-async def get_data_by_year(year: int, context: BrowserContext):
-    print(f"Fetching {year}")
-
-    page = await context.new_page()
+async def get_data_by_year(year: int, page: Page):
     await page.goto(SEARCH_PAGE_URL)
 
     # search for all sales within the year
@@ -42,27 +40,26 @@ async def get_data_by_year(year: int, context: BrowserContext):
 
     download = await download_info.value
     path = DATA_PATH / f"{year}.xlsx"
-    print(f"Saving to {path}")
     await download.save_as(path)
-
-    await page.close()
 
     return path
 
 
 async def get_data(
     start_year: int,
-    end_year: int | None = None,
-    concurrency=4,
-    headless=False,
+    end_year: Annotated[Optional[int], typer.Argument()] = None,
 ):
-    if start_year and end_year:
-        years = list(reversed(range(start_year, end_year + 1)))
-    else:
-        years = [start_year]
+    end_year = end_year or start_year
+    years = list(reversed(range(start_year, end_year + 1)))
+
+    print(
+        f"[b][yellow]Scraping property sales from Jan 1 {start_year} to Dec 31 {end_year}"
+    )
+
+    DATA_PATH.mkdir(exist_ok=True, parents=True)
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=headless)
+        browser = await pw.chromium.launch(headless=False)
         context = await browser.new_context()
 
         # agree to terms of use
@@ -71,21 +68,16 @@ async def get_data(
         await page.goto(SEARCH_PAGE_URL)
         await page.get_by_role("button", name="Agree", exact=True).click()
         await page.wait_for_selector(START_DATE_SELECTOR)  # wait to process
+
+        for y in track(years, description="Scraping..."):
+            await get_data_by_year(y, page)
+
         await page.close()
 
-        # scrape actual data while limiting number of simultaneous connections
-        _results = await asyncio_pool.AioPool(concurrency).map(
-            lambda y: get_data_by_year(y, context),
-            years,
-        )
 
-
-def main(
-    start_year: int,
-    end_year: Optional[int] = None,
-    concurrency: int = 4,
-):
-    asyncio.run(get_data(start_year, end_year, concurrency, headless))
+@wraps(get_data)
+def main(*args, **kwargs):
+    asyncio.run(get_data(*args, **kwargs))
 
 
 if __name__ == "__main__":
